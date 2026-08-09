@@ -245,8 +245,7 @@ def window_reverse(windows, window_size, dims):
     x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous().view(b, d, h, w, -1)
     return x
 
-
-class LocalCorrModule(nn.Module):
+class MicroLocalCorrelation(nn.Module):
     def __init__(self, embed_dim, num_heads=8, window_size=(2, 2, 2)):
         super().__init__()
         self.embed_dim = embed_dim
@@ -288,8 +287,7 @@ class LocalCorrModule(nn.Module):
         attn_out = attn_out.permute(0, 4, 1, 2, 3)
         return attn_out
 
-
-class GlobalCorrModule(nn.Module):
+class MacroGlobalCorrelation(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
         self.embed_dim = embed_dim
@@ -327,10 +325,10 @@ class CGNet(nn.Module):
         self.ca_2 = GroupedCoordinateAttention(channels=embed_dim_2, groups=min(16, embed_dim_2))
         self.ca_1 = GroupedCoordinateAttention(channels=embed_dim_1, groups=min(16, embed_dim_1))
 
-        self.corr_4 = GlobalCorrModule(embed_dim=embed_dim_4)
-        self.corr_3 = LocalCorrModule(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
-        self.corr_2 = LocalCorrModule(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
-        self.corr_1 = LocalCorrModule(embed_dim=embed_dim_1, num_heads=2, window_size=(2, 2, 2))
+        self.corr_4 = MacroGlobalCorrelation(embed_dim=embed_dim_4)
+        self.corr_3 = MicroLocalCorrelation(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
+        self.corr_2 = MicroLocalCorrelation(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
+        self.corr_1 = MicroLocalCorrelation(embed_dim=embed_dim_1, num_heads=2, window_size=(2, 2, 2))
 
         self.upsample_1 = DeconvBlock(channel_num * 2, channel_num * 1)
         self.upsample_2 = DeconvBlock(channel_num * 4, channel_num * 2)
