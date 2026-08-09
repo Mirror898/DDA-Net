@@ -61,11 +61,6 @@ class SpatialTransformer(nn.Module):
         grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor).cuda()
 
-        # registering the grid as a buffer cleanly moves it to the GPU, but it also
-        # adds it to the state dict. this is annoying since everything in the state dict
-        # is included when saving weights to disk, so the model files are way bigger
-        # than they need to be. so far, there does not appear to be an elegant solution.
-        # see: https://discuss.pytorch.org/t/how-to-register-buffer-without-polluting-state-dict
         self.register_buffer('grid', grid)
 
     def forward(self, src, flow):
@@ -73,12 +68,9 @@ class SpatialTransformer(nn.Module):
         new_locs = self.grid + flow
         shape = flow.shape[2:]
 
-        # need to normalize grid values to [-1, 1] for resampler
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
 
-        # move channels dim to last position
-        # also not sure why, but the channels need to be reversed
         if len(shape) == 2:
             new_locs = new_locs.permute(0, 2, 3, 1)
             new_locs = new_locs[..., [1, 0]]
@@ -116,23 +108,18 @@ def dice_val(y_pred, y_true, num_clus):
 
 
 def dice_val_VOI(y_pred, y_true):
-    # 使用您在 trans.txt 中定义的 seg_table
-    # 为了方便，我们在这里直接定义它，或者您可以从外部传入
-    # 注意：这里的列表应该和您最终确认的 seg_table 完全一致
-    # 我排除了标签 0，因为它通常代表背景
     VOI_lbls = [2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 26,
                 28, 30, 31, 41, 42, 43, 44, 46, 47, 49, 50, 51, 52, 53, 54, 58, 60, 62,
                 63, 72, 77, 80, 85, 251, 252, 253, 254, 255]
 
     pred = y_pred.detach().cpu().numpy()[0, 0, ...]
     true = y_true.detach().cpu().numpy()[0, 0, ...]
-    DSCs = []  # 使用列表更灵活
+    DSCs = []
 
     for i in VOI_lbls:
         pred_i = (pred == i)
         true_i = (true == i)
 
-        # 确保该结构在 ground truth 中存在，避免除以零
         if np.sum(true_i) == 0:
             continue
 
@@ -140,20 +127,19 @@ def dice_val_VOI(y_pred, y_true):
         union = np.sum(pred_i) + np.sum(true_i)
 
         if union == 0:
-            dsc = 1.0  # 如果预测和真值都为空，则认为完美匹配
+            dsc = 1.0  
         else:
             dsc = (2. * intersection) / (union + 1e-5)
 
         DSCs.append(dsc)
 
-    if not DSCs:  # 如果所有标签都不存在于 ground truth 中
+    if not DSCs: 
         return 0.0
 
     return np.mean(DSCs)
 
 
 def metric_val_VOI(y_pred, y_true):
-    # 定义需要评估的解剖结构标签
     VOI_lbls = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
                 29, 30, 31, 32, 33, 34, 35]
 
@@ -164,12 +150,9 @@ def metric_val_VOI(y_pred, y_true):
     hd_list = []
     asd_list = []
 
-    # +++ 新增：打印总标签数，以便知道进度 +++
-    # print(f"  Start calculating metrics for {len(VOI_lbls)} labels...", end='', flush=True)
 
     for idx, i in enumerate(VOI_lbls):
-        # +++ 新增：每处理 5 个标签打印一个点，或者打印当前标签索引 +++
-        # if idx % 5 == 0: print(f".", end='', flush=True)
+
 
         pred_i = (pred == i)
         true_i = (true == i)
@@ -195,8 +178,6 @@ def metric_val_VOI(y_pred, y_true):
         hd_list.append(hd)
         asd_list.append(asd)
 
-    # +++ 新增：换行 +++
-    # print(" Done.")
 
     if not dsc_list:
         return 0.0, 100.0, 100.0
