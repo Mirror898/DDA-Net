@@ -269,7 +269,7 @@ def window_reverse(windows, window_size, dims):
     return x
 
 
-class LocalCorrModule(nn.Module):
+class MicroLocalCorrelation(nn.Module):
     def __init__(self, embed_dim, num_heads=8, window_size=(2, 2, 2)):
         super().__init__()
         self.embed_dim = embed_dim
@@ -280,6 +280,7 @@ class LocalCorrModule(nn.Module):
 
     def forward(self, x_in, y_in):
         b, c, d, h, w = x_in.shape
+
         x_in = x_in.permute(0, 2, 3, 4, 1)
         y_in = y_in.permute(0, 2, 3, 4, 1)
 
@@ -296,6 +297,7 @@ class LocalCorrModule(nn.Module):
         y = nnf.pad(y, (0, 0, pad_l, pad_r, pad_t, pad_b, pad_d0, pad_d1))
 
         _, dp, hp, wp, _ = x.shape
+
         x_windows = window_partition(x, window_size)
         y_windows = window_partition(y, window_size)
         b_, n_, c_ = x_windows.shape
@@ -311,8 +313,7 @@ class LocalCorrModule(nn.Module):
         attn_out = attn_out.permute(0, 4, 1, 2, 3)
         return attn_out
 
-
-class GlobalCorrModule(nn.Module):
+class MacroGlobalCorrelation(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
         self.embed_dim = embed_dim
@@ -350,10 +351,10 @@ class DDA_Net(nn.Module):
         self.dda_2 = DDA(channels=embed_dim_2, groups=min(16, embed_dim_2))
         self.dda_1 = DDA(channels=embed_dim_1, groups=min(16, embed_dim_1))
 
-        self.corr_4 = GlobalCorrModule(embed_dim=embed_dim_4)
-        self.corr_3 = LocalCorrModule(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
-        self.corr_2 = LocalCorrModule(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
-        self.corr_1 = LocalCorrModule(embed_dim=embed_dim_1, num_heads=2, window_size=(2, 2, 2))
+        self.corr_4 = MacroGlobalCorrelation(embed_dim=embed_dim_4)
+        self.corr_3 = MicroLocalCorrelation(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
+        self.corr_2 = MicroLocalCorrelation(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
+        self.corr_1 = MicroLocalCorrelation(embed_dim=embed_dim_1, num_heads=2, window_size=(2, 2, 2))
 
         self.upsample_1 = DeconvBlock(channel_num * 2, channel_num * 1)
         self.upsample_2 = DeconvBlock(channel_num * 4, channel_num * 2)
