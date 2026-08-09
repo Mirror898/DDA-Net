@@ -5,15 +5,14 @@ import torch.nn.functional as nnf
 from torch.distributions.normal import Normal
 
 
-class DDSA(nn.Module):
+class DDA(nn.Module):
     def __init__(self, channels, groups=16):
         """
-        Efficient Multi-Scale Attention Module (EMA) 的3D实现 - 修改版
-        移除 Step 3 Cross-spatial learning，仅保留 Step 1 和 Step 2 的特征融合。
+        Modified EMA 3D implementation
         """
-        super(DDSA, self).__init__()
+        super(DDA, self).__init__()
         self.groups = groups
-        assert channels % self.groups == 0, "通道数必须能被组数整除"
+        assert channels % self.groups == 0, f"channels {channels} must be divisible by groups {groups}"
 
         self.group_channels = channels // self.groups
 
@@ -44,7 +43,7 @@ class DDSA(nn.Module):
 
         group_x = x.view(b * self.groups, self.group_channels, d, h, w)
 
-        # --- Step 1: 1x1 分支 (3D 坐标注意力) ---
+        # --- Step 1: 1x1 branch (3D Coordinate Attention) ---
         x_d = self.pool_d(group_x)
         x_h = self.pool_h(group_x).permute(0, 1, 3, 2, 4)
         x_w = self.pool_w(group_x).permute(0, 1, 4, 2, 3)
@@ -57,13 +56,14 @@ class DDSA(nn.Module):
 
         x1 = self.gn(group_x * x_d_out.sigmoid() * x_h_out.sigmoid() * x_w_out.sigmoid())
 
-        # --- Step 2: 3x3 分支 ---
+        # --- Step 2: 3x3 branch ---
         x2 = self.conv3x3(group_x)
 
-        # --- Step 3: Removed Cross-spatial learning ---
+        # Feature fusion without cross-spatial learning
         out = x1 + x2
 
         return out.view(b, c, d, h, w)
+
 
 class ResConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -87,6 +87,7 @@ class ResConvBlock(nn.Module):
         x += residual
         x = self.act(x)
         return x
+
 
 class RegHead(nn.Module):
     def __init__(self, in_channels, out_channels=3, kernel_size=3, stride=1, padding=1):
@@ -259,7 +260,7 @@ def window_reverse(windows, window_size, dims):
     return x
 
 
-class LocalCorrModule(nn.Module):
+class MicroLocalCorrelation(nn.Module):
     def __init__(self, embed_dim, num_heads=8, window_size=(2, 2, 2)):
         super().__init__()
         self.embed_dim = embed_dim
@@ -270,6 +271,7 @@ class LocalCorrModule(nn.Module):
 
     def forward(self, x_in, y_in):
         b, c, d, h, w = x_in.shape
+
         x_in = x_in.permute(0, 2, 3, 4, 1)
         y_in = y_in.permute(0, 2, 3, 4, 1)
 
@@ -286,6 +288,7 @@ class LocalCorrModule(nn.Module):
         y = nnf.pad(y, (0, 0, pad_l, pad_r, pad_t, pad_b, pad_d0, pad_d1))
 
         _, dp, hp, wp, _ = x.shape
+
         x_windows = window_partition(x, window_size)
         y_windows = window_partition(y, window_size)
         b_, n_, c_ = x_windows.shape
@@ -302,7 +305,7 @@ class LocalCorrModule(nn.Module):
         return attn_out
 
 
-class GlobalCorrModule(nn.Module):
+class MacroGlobalCorrelation(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
         self.embed_dim = embed_dim
@@ -316,7 +319,7 @@ class GlobalCorrModule(nn.Module):
         return corr
 
 
-class CGNet(nn.Module):
+class DDA_Net(nn.Module):
     def __init__(self, in_channels=1, channel_num=16):
         super().__init__()
 
@@ -335,15 +338,15 @@ class CGNet(nn.Module):
             embed_dim_2 = x_mov_2.shape[1]
             embed_dim_1 = x_mov_1.shape[1]
 
-        self.ddsa_4 = DDSA(channels=embed_dim_4, groups=min(16, embed_dim_4))
-        self.ddsa_3 = DDSA(channels=embed_dim_3, groups=min(16, embed_dim_3))
-        self.ddsa_2 = DDSA(channels=embed_dim_2, groups=min(16, embed_dim_2))
-        self.ddsa_1 = DDSA(channels=embed_dim_1, groups=min(16, embed_dim_1))
+        self.dda_4 = DDA(channels=embed_dim_4, groups=min(16, embed_dim_4))
+        self.dda_3 = DDA(channels=embed_dim_3, groups=min(16, embed_dim_3))
+        self.dda_2 = DDA(channels=embed_dim_2, groups=min(16, embed_dim_2))
+        self.dda_1 = DDA(channels=embed_dim_1, groups=min(16, embed_dim_1))
 
-        self.corr_4 = GlobalCorrModule(embed_dim=embed_dim_4)
-        self.corr_3 = LocalCorrModule(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
-        self.corr_2 = LocalCorrModule(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
-        self.corr_1 = LocalCorrModule(embed_dim=embed_dim_1, num_heads=2, window_size=(2, 2, 2))
+        self.corr_4 = MacroGlobalCorrelation(embed_dim=embed_dim_4)
+        self.corr_3 = MicroLocalCorrelation(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
+        self.corr_2 = MicroLocalCorrelation(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
+        self.corr_1 = MicroLocalCorrelation(embed_dim=embed_dim_1, num_heads=2, window_size=(2, 2, 2))
 
         self.upsample_1 = DeconvBlock(channel_num * 2, channel_num * 1)
         self.upsample_2 = DeconvBlock(channel_num * 4, channel_num * 2)
@@ -369,22 +372,20 @@ class CGNet(nn.Module):
         x_mov_1, x_mov_2, x_mov_3, x_mov_4 = self.encoder(moving)
         x_fix_1, x_fix_2, x_fix_3, x_fix_4 = self.encoder(fixed)
 
-        # Step 1: Level 4
-        x_mov_4_ddsa = self.ddsa_4(x_mov_4)
-        x_fix_4_ddsa = self.ddsa_4(x_fix_4)
-        corr_4 = self.corr_4(x_mov_4_ddsa, x_fix_4_ddsa)
+        x_mov_4_dda = self.dda_4(x_mov_4)
+        x_fix_4_dda = self.dda_4(x_fix_4)
+        corr_4 = self.corr_4(x_mov_4_dda, x_fix_4_dda)
         cat = torch.cat([x_mov_4, corr_4, x_fix_4], dim=1)
         conv_corr_4 = self.conv_4(cat)
         flow_4 = self.reghead_4(conv_corr_4)
 
-        # Step 2: Level 3
         flow_4_up = self.ResizeTransformer(flow_4)
         x_mov_3_warped = self.SpatialTransformer(x_mov_3, flow_4_up)
         conv_corr_4_up = self.upsample_3(conv_corr_4)
 
-        x_mov_3_warped_ddsa = self.ddsa_3(x_mov_3_warped)
-        x_fix_3_ddsa = self.ddsa_3(x_fix_3)
-        corr_3 = self.corr_3(x_mov_3_warped_ddsa, x_fix_3_ddsa)
+        x_mov_3_warped_dda = self.dda_3(x_mov_3_warped)
+        x_fix_3_dda = self.dda_3(x_fix_3)
+        corr_3 = self.corr_3(x_mov_3_warped_dda, x_fix_3_dda)
         cat = torch.cat([x_mov_3_warped, corr_3, x_fix_3], dim=1)
 
         conv_corr_3 = self.conv_3(cat)
@@ -396,14 +397,13 @@ class CGNet(nn.Module):
         fine_flow_3 = self.fine_reghead_3(conv_fine_3)
         flow_3 = flow_3 + fine_flow_3
 
-        # Step 3: Level 2
         flow_3_up = self.ResizeTransformer(flow_3)
         x_mov_2_warped = self.SpatialTransformer(x_mov_2, flow_3_up)
         conv_fine_3_up = self.upsample_2(conv_fine_3)
 
-        x_mov_2_warped_ddsa = self.ddsa_2(x_mov_2_warped)
-        x_fix_2_ddsa = self.ddsa_2(x_fix_2)
-        corr_2 = self.corr_2(x_mov_2_warped_ddsa, x_fix_2_ddsa)
+        x_mov_2_warped_dda = self.dda_2(x_mov_2_warped)
+        x_fix_2_dda = self.dda_2(x_fix_2)
+        corr_2 = self.corr_2(x_mov_2_warped_dda, x_fix_2_dda)
         cat = torch.cat([x_mov_2_warped, corr_2, x_fix_2], dim=1)
 
         conv_corr_2 = self.conv_2(cat)
@@ -415,14 +415,13 @@ class CGNet(nn.Module):
         fine_flow_2 = self.fine_reghead_2(conv_fine_2)
         flow_2 = flow_2 + fine_flow_2
 
-        # Step 4: Level 1
         flow_2_up = self.ResizeTransformer(flow_2)
         x_mov_1_warped = self.SpatialTransformer(x_mov_1, flow_2_up)
         conv_fine_2_up = self.upsample_1(conv_fine_2)
 
-        x_mov_1_warped_ddsa = self.ddsa_1(x_mov_1_warped)
-        x_fix_1_ddsa = self.ddsa_1(x_fix_1)
-        corr_1 = self.corr_1(x_mov_1_warped_ddsa, x_fix_1_ddsa)
+        x_mov_1_warped_dda = self.dda_1(x_mov_1_warped)
+        x_fix_1_dda = self.dda_1(x_fix_1)
+        corr_1 = self.corr_1(x_mov_1_warped_dda, x_fix_1_dda)
 
         cat = torch.cat([x_mov_1_warped, corr_1, x_fix_1], dim=1)
         conv_corr_1 = self.conv_1(cat)
