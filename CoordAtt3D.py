@@ -18,16 +18,11 @@ class GroupedCA(nn.Module):
 
         self.group_channels = channels // self.groups
 
-        # 1x1 分支 (类坐标注意力机制)
-        # 将3D特征图分别在 D, H, W 维度进行全局池化
         self.pool_d = nn.AdaptiveAvgPool3d((None, 1, 1))
         self.pool_h = nn.AdaptiveAvgPool3d((1, None, 1))
         self.pool_w = nn.AdaptiveAvgPool3d((1, 1, None))
 
         self.gn = nn.GroupNorm(self.group_channels, self.group_channels)
-
-        # 1x1x1 卷积：用于融合 D+H+W 的特征
-        # 注意：这里处理的是 group_channels，实现了分组卷积的效果
         self.conv1x1 = nn.Conv3d(
             in_channels=self.group_channels,
             out_channels=self.group_channels,
@@ -39,38 +34,23 @@ class GroupedCA(nn.Module):
     def forward(self, x):
         b, c, d, h, w = x.shape
 
-        # 1. 将通道分组 (B, C, D, H, W) -> (B*G, C//G, D, H, W)
         group_x = x.view(b * self.groups, self.group_channels, d, h, w)
 
-        # --- 坐标注意力核心逻辑 (Coordinate Attention) ---
-
-        # 2. 分别进行池化
         x_d = self.pool_d(group_x)  # (b*g, c//g, d, 1, 1)
         x_h = self.pool_h(group_x).permute(0, 1, 3, 2, 4)  # (b*g, c//g, 1, h, 1) -> (b*g, c//g, h, 1, 1)
         x_w = self.pool_w(group_x).permute(0, 1, 4, 2, 3)  # (b*g, c//g, 1, 1, w) -> (b*g, c//g, w, 1, 1)
 
-        # 3. 拼接并通过 1x1 卷积融合信息
-        # 对应 Coordinate Attention 中的 f = \delta(Bn(Conv1x1([gh, gw])))
         dhw = self.conv1x1(torch.cat([x_d, x_h, x_w], dim=2))  # (b*g, c//g, d+h+w, 1, 1)
 
-        # 4. 拆分回 D, H, W
         x_d_out, x_h_out, x_w_out = torch.split(dhw, [d, h, w], dim=2)
 
-        # 5. 还原维度
         x_h_out = x_h_out.permute(0, 1, 3, 2, 4)  # (b*g, c//g, 1, h, 1)
         x_w_out = x_w_out.permute(0, 1, 3, 4, 2)  # (b*g, c//g, 1, 1, w)
 
-        # 6. 生成注意力权重并加权
-        # 注意力 = Sigmoid(x_d) * Sigmoid(x_h) * Sigmoid(x_w)
-        # 最后经过 GroupNorm
         out = self.gn(group_x * x_d_out.sigmoid() * x_h_out.sigmoid() * x_w_out.sigmoid())
 
-        # 7. 还原回原始 Batch 维度
         return out.view(b, c, d, h, w)
 
-
-# 下面是配套的 CGNet 定义，只需将 DDSA 替换为上面的 GroupedCA 即可
-# ================================================================
 
 class ResConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -269,8 +249,7 @@ def window_reverse(windows, window_size, dims):
     x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous().view(b, d, h, w, -1)
     return x
 
-
-class LocalCorrModule(nn.Module):
+class MicroLocalCorrelation(nn.Module):
     def __init__(self, embed_dim, num_heads=8, window_size=(2, 2, 2)):
         super().__init__()
         self.embed_dim = embed_dim
@@ -313,7 +292,7 @@ class LocalCorrModule(nn.Module):
         return attn_out
 
 
-class GlobalCorrModule(nn.Module):
+class MacroGlobalCorrelation(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
         self.embed_dim = embed_dim
@@ -347,18 +326,15 @@ class CGNet(nn.Module):
             embed_dim_3 = x_mov_3.shape[1]
             embed_dim_2 = x_mov_2.shape[1]
 
-        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # +++ 替换为 GroupedCA +++
-        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         self.ddsa_5 = GroupedCA(channels=embed_dim_5)
         self.ddsa_4 = GroupedCA(channels=embed_dim_4)
         self.ddsa_3 = GroupedCA(channels=embed_dim_3)
         self.ddsa_2 = GroupedCA(channels=embed_dim_2)
 
-        self.corr_5 = GlobalCorrModule(embed_dim=embed_dim_5)
-        self.corr_4 = LocalCorrModule(embed_dim=embed_dim_4, num_heads=16, window_size=(2, 2, 2))
-        self.corr_3 = LocalCorrModule(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
-        self.corr_2 = LocalCorrModule(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
+        self.corr_5 = MacroGlobalCorrelation(embed_dim=embed_dim_5)
+        self.corr_4 = MicroLocalCorrelation(embed_dim=embed_dim_4, num_heads=16, window_size=(2, 2, 2))
+        self.corr_3 = MicroLocalCorrelation(embed_dim=embed_dim_3, num_heads=8, window_size=(2, 2, 2))
+        self.corr_2 = MicroLocalCorrelation(embed_dim=embed_dim_2, num_heads=4, window_size=(2, 2, 2))
 
         self.upsample_1 = DeconvBlock(channel_num * 2, channel_num * 1)
         self.upsample_2 = DeconvBlock(channel_num * 4, channel_num * 2)
@@ -385,7 +361,6 @@ class CGNet(nn.Module):
         self.SpatialTransformer = SpatialTransformer_block(mode='bilinear')
 
     def forward(self, moving, fixed):
-        # 保持与 EMA.py 一致的 Forward 逻辑
         x_mov_1, x_mov_2, x_mov_3, x_mov_4, x_mov_5 = self.encoder(moving)
         x_fix_1, x_fix_2, x_fix_3, x_fix_4, x_fix_5 = self.encoder(fixed)
 
